@@ -56,17 +56,95 @@ The emphasis is **system adaptation** rather than only **user adaptation**: the 
 
 ## Setup and run
 
-Setup instructions will be added once the first runnable code is available.
+### Backend
+
+From `backend/`:
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Run the simulated end-to-end BCI validation:
+
+```bash
+lockedin-validate
+```
+
+Or:
+
+```bash
+python3 scripts/validate_pipeline.py
+```
+
+Start the WebSocket server for the live dashboard:
+
+```bash
+lockedin-verification-server
+```
+
+For live Lab Streaming Layer ingestion, install the optional dependency:
+
+```bash
+pip install -e ".[lsl]"
+```
+
+### Frontend
+
+From `frontend/` (in a second terminal, with the verification server running):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open the URL Vite prints (usually `http://localhost:5173`). The dashboard connects to `ws://localhost:8765`.
 
 ---
 
-## Repository structure (TBD)
+## Repository structure
 
-When code exists, this README will point to:
+```
+LOCKEDINCOMMUNICATOR/
+├── backend/                  # Everything Python lives here
+│   ├── .venv/
+│   ├── src/                  # Core BCI processing engine
+│   │   ├── pipeline/
+│   │   ├── ingestion/
+│   │   ├── preprocessing/
+│   │   ├── features/
+│   │   ├── inference/
+│   │   ├── config.py
+│   │   ├── validation.py
+│   │   └── server.py         # WebSocket server
+│   ├── config/               # Hardware / channel mappings
+│   ├── scripts/              # Data simulation / validation entry points
+│   ├── pyproject.toml
+│   └── requirements.txt
+│
+├── frontend/                 # Everything React lives here
+│   ├── src/                  # Components, hooks, styles
+│   ├── public/               # Static assets
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── tailwind.config.js
+│
+└── README.md                 # Global project documentation
+```
 
-- `data/` — download instructions only (no large raw recordings in git if avoidable).
-- `notebooks/` or `experiments/` — exploratory analysis.
-- `src/` — training, evaluation, and (later) inference.
+### Backend modules
+
+- `backend/src/config.py` — signal, filter, epoching, classifier, simulator, and feedback settings.
+- `backend/src/ingestion/` — LSL ingestion and mock EEG stream generation.
+- `backend/src/preprocessing/` — bandpass, notch rejection, and epoch slicing.
+- `backend/src/features/` — Common Spatial Patterns spatial filtering.
+- `backend/src/inference/` — shrinkage LDA classification and feedback dispatch.
+- `backend/src/pipeline/` — end-to-end BCI orchestration and cross-validation.
+- `backend/src/server.py` — WebSocket server for the live dashboard.
+- `backend/scripts/validate_pipeline.py` — simulated validation entry point.
 
 ---
 
