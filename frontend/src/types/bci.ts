@@ -41,7 +41,7 @@ export interface BCIMetricsMessage {
   raw_signal_snapshot: number[];
 }
 
-/** Initial state snapshot sent when a client first connects. */
+/** State snapshot sent when a client first connects. */
 export interface BCIStateMessage {
   type: 'state';
   system_state: SystemState;

@@ -23,8 +23,8 @@ import type {
   BCIMetricsMessage,
   BCIStateMessage,
   ConnectionStatus,
-  SystemState,
   IntentTarget,
+  SystemState,
 } from '../types/bci';
 
 const DEFAULT_URL = 'ws://localhost:8765';
@@ -112,9 +112,9 @@ export function useBCISocket(url: string = DEFAULT_URL): BCISocketState {
         }
 
         if (msg.type === 'state') {
-          // Lightweight state snapshot on initial connection
-          setSystemState((msg as BCIStateMessage).system_state);
-          setTargetIntent((msg as BCIStateMessage).target_intent);
+          const state = msg as BCIStateMessage;
+          setSystemState(state.system_state);
+          setTargetIntent(state.target_intent);
           return;
         }
 
@@ -160,9 +160,12 @@ export function useBCISocket(url: string = DEFAULT_URL): BCISocketState {
   }, [url]);
 
   const sendCommand = useCallback((cmd: BCICommand) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(cmd));
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(cmd));
+      return;
     }
+    console.warn('[BCI] Cannot send command — WebSocket is not connected.', cmd);
   }, []);
 
   return { status, latest, waveformBuffer, systemState, targetIntent, sendCommand };

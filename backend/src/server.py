@@ -54,8 +54,6 @@ class BCIVerificationServer:
         Resume the simulation loop.
     ``{"command": "PAUSE"}``
         Pause epoch generation (server stays alive, waveform freezes).
-    ``{"command": "SET_TARGET", "value": "YES"|"NO"|"AUTO"}``
-        Force the mock streamer to generate a specific intent class.
     ``{"command": "RESET"}``
         Clear rolling accuracy history and epoch counter.
     """
@@ -66,7 +64,6 @@ class BCIVerificationServer:
         self._clients: Set[Any] = set()
 
         self._system_state: str = "FITTING"
-        self._target_intent: str = "AUTO"
         self._epoch_count: int = 0
 
         # Sliding window of correct/incorrect flags
@@ -111,14 +108,6 @@ class BCIVerificationServer:
                     await asyncio.sleep(0.1)
                     continue
 
-                # Apply current target intent to streamer
-                _target_map: dict[str, str | None] = {
-                    "YES": yes_text,
-                    "NO": no_text,
-                    "AUTO": None,
-                }
-                streamer.set_target(_target_map[self._target_intent])
-
                 # Synthesize one epoch using the streamer's internal logic
                 gt_label = streamer._label_for_sample(sample_counter)
                 raw_epoch = streamer._synthesize(gt_label, sample_counter, epoch_samples)
@@ -147,7 +136,6 @@ class BCIVerificationServer:
                     "ground_truth": ground_truth_text,
                     "overall_accuracy": round(self._rolling_accuracy(), 4),
                     "epoch_count": self._epoch_count,
-                    "target_intent": self._target_intent,
                     "system_state": self._system_state,
                     "raw_signal_snapshot": snapshot,
                 }
@@ -177,6 +165,19 @@ class BCIVerificationServer:
             if isinstance(result, Exception):
                 self._clients.discard(client)
 
+    async def _broadcast_state(self) -> None:
+        """Push the current control state so the dashboard updates immediately."""
+        await self._broadcast(
+            json.dumps(
+                {
+                    "type": "state",
+                    "system_state": self._system_state,
+                    "epoch_count": self._epoch_count,
+                    "overall_accuracy": round(self._rolling_accuracy(), 4),
+                }
+            )
+        )
+
     async def _handler(self, websocket: Any) -> None:
         """Manage one client: deliver initial state, then handle commands."""
         self._clients.add(websocket)
@@ -187,8 +188,8 @@ class BCIVerificationServer:
         await websocket.send(json.dumps({
             "type": "state",
             "system_state": self._system_state,
-            "target_intent": self._target_intent,
             "epoch_count": self._epoch_count,
+            "overall_accuracy": round(self._rolling_accuracy(), 4),
         }))
 
         try:
@@ -208,23 +209,25 @@ class BCIVerificationServer:
             return
 
         command = str(msg.get("command", "")).upper()
+        handled = False
         if command == "START":
             self._system_state = "RUNNING"
             logger.info("Simulation started.")
+            handled = True
         elif command == "PAUSE":
             self._system_state = "PAUSED"
             logger.info("Simulation paused.")
-        elif command == "SET_TARGET":
-            value = str(msg.get("value", "AUTO")).upper()
-            if value in ("YES", "NO", "AUTO"):
-                self._target_intent = value
-                logger.info("Target intent → %s", value)
+            handled = True
         elif command == "RESET":
             self._accuracy_window.clear()
             self._epoch_count = 0
             logger.info("Stats reset.")
+            handled = True
         else:
             logger.warning("Unknown command: %r", command)
+
+        if handled:
+            await self._broadcast_state()
 
     # ------------------------------------------------------------------
     # Entry-point
