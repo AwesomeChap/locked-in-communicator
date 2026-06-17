@@ -190,7 +190,7 @@ function ConnectionBadge({ status }: { status: ConnectionStatus }) {
         status === 'CONNECTED'    && 'animate-pulse',
         status === 'RECONNECTING' && 'animate-spin',
       )} />
-      {status}
+      <span className="hidden sm:inline">{status}</span>
     </div>
   );
 }
@@ -212,7 +212,7 @@ function ModeToggle({ mode, onChange }: { mode: AppMode; onChange: (m: AppMode) 
           key={id}
           onClick={() => onChange(id)}
           className={cn(
-            'flex items-center gap-1.5 rounded-md px-4 py-1.5',
+            'flex items-center gap-1.5 rounded-md px-2.5 py-1.5 sm:px-4',
             'text-xs font-semibold transition-all duration-200',
             mode === id
               ? 'bg-zinc-100 text-zinc-950 shadow-sm'
@@ -220,7 +220,7 @@ function ModeToggle({ mode, onChange }: { mode: AppMode; onChange: (m: AppMode) 
           )}
         >
           <Icon className="h-3.5 w-3.5 shrink-0" />
-          {label}
+          <span className="hidden sm:inline">{label}</span>
         </button>
       ))}
     </div>
@@ -241,13 +241,13 @@ function TopBar({
   status: ConnectionStatus;
 }) {
   return (
-    <header className="sticky top-0 z-20 flex items-center border-b border-zinc-800/60 bg-zinc-950/95 px-5 py-3 backdrop-blur-sm">
+    <header className="sticky top-0 z-20 flex items-center gap-2 border-b border-zinc-800/60 bg-zinc-950/95 px-4 py-3 backdrop-blur-sm">
       {/* Wordmark */}
-      <div className="flex w-48 shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600">
           <Zap className="h-4 w-4 text-white" />
         </div>
-        <div>
+        <div className="hidden sm:block">
           <div className="text-sm font-bold leading-none text-zinc-100">LockedIn BCI</div>
           <div className="mt-0.5 text-[9px] font-semibold tracking-widest text-zinc-600 uppercase">
             ASE 2026
@@ -261,7 +261,7 @@ function TopBar({
       </div>
 
       {/* Connection badge */}
-      <div className="flex w-48 shrink-0 justify-end">
+      <div className="flex shrink-0 justify-end">
         <ConnectionBadge status={status} />
       </div>
     </header>
@@ -1048,14 +1048,15 @@ export default function Dashboard() {
 
   return (
     <div className="flex min-h-screen flex-col bg-zinc-950 text-zinc-50 font-sans">
+      <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col">
       <TopBar mode={mode} onModeChange={handleModeChange} status={status} />
 
-      <main className="flex flex-1 gap-4 overflow-hidden p-4">
+      <main className="flex flex-1 flex-col gap-4 overflow-auto p-4 md:flex-row md:overflow-hidden">
 
         {/* ── Center: visualizers ── */}
         <div className="flex min-w-0 flex-1 flex-col gap-3">
-          <div className="grid grid-cols-5 gap-3">
-            <div className="col-span-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-5">
+            <div className="sm:col-span-3">
               <IntentCard
                 predictedClass={displayPredicted}
                 flashKey={displayFlashKey}
@@ -1063,7 +1064,7 @@ export default function Dashboard() {
                 mode={mode}
               />
             </div>
-            <div className="col-span-2">
+            <div className="sm:col-span-2">
               <ConfidenceGauge confidence={displayConfidence} />
             </div>
           </div>
@@ -1072,7 +1073,7 @@ export default function Dashboard() {
         </div>
 
         {/* ── Right: mode-conditional sidebar ── */}
-        <aside className="flex w-[380px] shrink-0 flex-col">
+        <aside className="flex w-full shrink-0 flex-col md:w-[380px]">
           {mode === 'online' ? (
             <OnlineSidebar
               systemState={systemState}
@@ -1094,8 +1095,9 @@ export default function Dashboard() {
       </main>
 
       <footer className="border-t border-zinc-800/60 py-2 text-center font-mono text-[9px] text-zinc-800">
-        LockedIn Communicator · ASE 2026 · ws://localhost:8765
+        LockedIn Communicator · ASE 2026 · {window.location.host}/ws
       </footer>
+      </div>
     </div>
   );
 }

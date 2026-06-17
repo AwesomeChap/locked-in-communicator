@@ -27,7 +27,13 @@ import type {
   SystemState,
 } from '../types/bci';
 
-const DEFAULT_URL = 'ws://localhost:8765';
+// Same-origin WebSocket: automatically uses wss:// in production (HTTPS) and
+// ws:// in development.  In dev, Vite proxies /ws → ws://localhost:8765.
+const DEFAULT_URL =
+  (typeof window !== 'undefined'
+    ? (window.location.protocol === 'https:' ? 'wss' : 'ws') +
+      '://' + window.location.host + '/ws'
+    : 'ws://localhost:8765');
 const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 15_000;
 const WAVEFORM_BUFFER_SIZE = 300;

@@ -6,6 +6,15 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    // Proxy /ws to the local Python server during development so the frontend
+    // can use the same same-origin URL pattern as production.
+    proxy: {
+      '/ws': {
+        target: 'ws://localhost:8765',
+        ws: true,
+        rewriteWsOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist',

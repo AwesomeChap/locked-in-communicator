@@ -1,7 +1,8 @@
-"""Real-time WebSocket verification server for the BCI pipeline.
+"""Real-time WebSocket + static-file server for the BCI verification dashboard.
 
-Runs the full BCIPipeline in simulation mode, broadcasts per-epoch metrics to
-all connected frontend clients, and accepts bidirectional control commands.
+Serves the compiled React frontend as static files **and** the WebSocket
+endpoint (``/ws``) from a single aiohttp process.  This lets the whole app
+run as one Render web service without CORS or two-service complexity.
 
 Entry-point: ``lockedin-verification-server`` (see pyproject.toml).
 """
@@ -11,14 +12,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections import deque
 from datetime import datetime, timezone
-from typing import Any, Set
+from typing import Any, AsyncIterator, Set
 
+import aiohttp
 import numpy as np
-import websockets
-import websockets.exceptions
+from aiohttp import web
 
 from config import load_config
 from pipeline.bci_pipeline import BCIPipeline
@@ -28,8 +30,40 @@ logger = logging.getLogger(__name__)
 _HISTORY_LEN = 50
 _EPOCH_INTERVAL_S = 0.5   # 2 Hz classification rate
 _SNAPSHOT_POINTS = 120    # raw-signal points sent per epoch
-_WS_HOST = "localhost"
-_WS_PORT = 8765
+# Render (and most PaaS) inject PORT; fall back to 8765 for local dev.
+_WS_HOST = os.environ.get("WS_HOST", "0.0.0.0")
+_WS_PORT = int(os.environ.get("PORT", "8765"))
+# Path to the compiled React app.  Resolved relative to CWD so it works both
+# locally (CWD = repo root) and on Render (also runs from repo root).
+_STATIC_DIR = os.path.abspath(
+    os.environ.get("STATIC_DIR", "frontend/dist")
+)
+
+
+# ---------------------------------------------------------------------------
+# Thin adapter: lets _handler speak the same API regardless of WS library
+# ---------------------------------------------------------------------------
+
+
+class _AioWSAdapter:
+    """Wraps aiohttp WebSocketResponse to match the interface _handler expects."""
+
+    def __init__(self, ws: web.WebSocketResponse, request: web.Request) -> None:
+        self._ws = ws
+        self.remote_address = request.remote
+
+    async def send(self, message: str) -> None:
+        await self._ws.send_str(message)
+
+    def __aiter__(self) -> AsyncIterator[str]:
+        return self._iter()
+
+    async def _iter(self) -> AsyncIterator[str]:  # type: ignore[override]
+        async for msg in self._ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                yield msg.data
+            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.ERROR):
+                break
 
 # ---------------------------------------------------------------------------
 # Server
@@ -195,7 +229,7 @@ class BCIVerificationServer:
         try:
             async for raw in websocket:
                 await self._dispatch_command(raw)
-        except websockets.exceptions.ConnectionClosed:
+        except Exception:
             pass
         finally:
             self._clients.discard(websocket)
@@ -233,29 +267,63 @@ class BCIVerificationServer:
     # Entry-point
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # aiohttp route handlers
+    # ------------------------------------------------------------------
+
+    async def _ws_route(self, request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        await self._handler(_AioWSAdapter(ws, request))
+        return ws
+
+    async def _static_route(self, request: web.Request) -> web.Response:
+        """Serve static files; fall back to index.html for SPA deep-links."""
+        path = request.match_info.get("path", "")
+        target = os.path.join(_STATIC_DIR, path) if path else _STATIC_DIR
+        if os.path.isfile(target):
+            return web.FileResponse(target)
+        index = os.path.join(_STATIC_DIR, "index.html")
+        if os.path.isfile(index):
+            return web.FileResponse(index)
+        return web.Response(status=404, text="Not found — did you build the frontend?")
+
+    # ------------------------------------------------------------------
+    # Entry-point
+    # ------------------------------------------------------------------
+
     async def serve(self, host: str = _WS_HOST, port: int = _WS_PORT) -> None:
-        """Fit the pipeline, then start the WebSocket server indefinitely."""
+        """Fit the pipeline, then serve HTTP + WebSocket until cancelled."""
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._fit_pipeline_sync)
         self._system_state = "PAUSED"
 
         sim_task = asyncio.create_task(self._simulation_loop())
 
-        async with websockets.serve(self._handler, host, port):
-            logger.info(
-                "BCI verification server running at ws://%s:%d — waiting for clients.",
-                host,
-                port,
-            )
-            try:
-                await asyncio.Future()  # run forever
-            except asyncio.CancelledError:
-                pass
-        sim_task.cancel()
+        app = web.Application()
+        app.router.add_get("/ws", self._ws_route)
+        app.router.add_get("/{path:.*}", self._static_route)
+
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host, port)
+        await site.start()
+
+        logger.info(
+            "BCI server running at http://%s:%d  (WS → /ws, UI → /)",
+            host, port,
+        )
         try:
-            await sim_task
+            await asyncio.Future()  # run forever
         except asyncio.CancelledError:
             pass
+        finally:
+            sim_task.cancel()
+            try:
+                await sim_task
+            except asyncio.CancelledError:
+                pass
+            await runner.cleanup()
 
 
 # ---------------------------------------------------------------------------

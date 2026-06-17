@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: lockedin-communicator
+    runtime: python
+    # Run everything from the repo root so relative paths resolve correctly.
+    buildCommand: >
+      cd frontend && npm install && npm run build && cd ..
+      && pip install -r backend/requirements.txt
+      && pip install -e backend
+    startCommand: lockedin-verification-server
+    envVars:
+      - key: WS_HOST
+        value: 0.0.0.0
+      # Tell the server where the compiled React app lives.
+      # Render runs start commands from the repo root, so this is correct.
+      - key: STATIC_DIR
+        value: frontend/dist
+      # PORT is injected automatically by Render — do not set it here.
