@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 lsl = ["pylsl>=1.16"]
+edf = ["mne>=1.6"]
 
 [project.scripts]
 lockedin-validate = "validation:main"

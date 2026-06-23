@@ -21,6 +21,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type {
   BCICommand,
   BCIMetricsMessage,
+  BCIOfflineErrorMessage,
+  BCIOfflineResultMessage,
+  BCIServerMessage,
   BCIStateMessage,
   ConnectionStatus,
   IntentTarget,
@@ -53,6 +56,10 @@ export interface BCISocketState {
   systemState: SystemState;
   /** Current target intent as reported by the server. */
   targetIntent: IntentTarget;
+  /** Latest offline validation result (null until an ANALYZE_OFFLINE completes). */
+  offlineResult: BCIOfflineResultMessage | null;
+  /** Latest offline validation error, if the last request failed. */
+  offlineError: BCIOfflineErrorMessage | null;
   /** Send a control command to the Python server. */
   sendCommand: (cmd: BCICommand) => void;
 }
@@ -67,6 +74,10 @@ export function useBCISocket(url: string = DEFAULT_URL): BCISocketState {
   const [waveformBuffer, setWaveformBuffer] = useState<number[]>([]);
   const [systemState, setSystemState] = useState<SystemState>('FITTING');
   const [targetIntent, setTargetIntent] = useState<IntentTarget>('AUTO');
+  const [offlineResult, setOfflineResult] =
+    useState<BCIOfflineResultMessage | null>(null);
+  const [offlineError, setOfflineError] =
+    useState<BCIOfflineErrorMessage | null>(null);
 
   // Mutable refs — never cause re-renders
   const wsRef = useRef<WebSocket | null>(null);
@@ -110,9 +121,9 @@ export function useBCISocket(url: string = DEFAULT_URL): BCISocketState {
       };
 
       ws.onmessage = ({ data }: MessageEvent<string>) => {
-        let msg: BCIMetricsMessage | BCIStateMessage;
+        let msg: BCIServerMessage;
         try {
-          msg = JSON.parse(data) as BCIMetricsMessage | BCIStateMessage;
+          msg = JSON.parse(data) as BCIServerMessage;
         } catch {
           return;
         }
@@ -121,6 +132,19 @@ export function useBCISocket(url: string = DEFAULT_URL): BCISocketState {
           const state = msg as BCIStateMessage;
           setSystemState(state.system_state);
           setTargetIntent(state.target_intent);
+          return;
+        }
+
+        // Offline analysis responses are one-off — apply them immediately
+        // (no RAF throttling needed) and clear any prior error/result.
+        if (msg.type === 'offline_result') {
+          setOfflineError(null);
+          setOfflineResult(msg as BCIOfflineResultMessage);
+          return;
+        }
+        if (msg.type === 'offline_error') {
+          setOfflineResult(null);
+          setOfflineError(msg as BCIOfflineErrorMessage);
           return;
         }
 
@@ -174,5 +198,14 @@ export function useBCISocket(url: string = DEFAULT_URL): BCISocketState {
     console.warn('[BCI] Cannot send command — WebSocket is not connected.', cmd);
   }, []);
 
-  return { status, latest, waveformBuffer, systemState, targetIntent, sendCommand };
+  return {
+    status,
+    latest,
+    waveformBuffer,
+    systemState,
+    targetIntent,
+    offlineResult,
+    offlineError,
+    sendCommand,
+  };
 }

@@ -1,10 +1,14 @@
 /**
  * OfflineAnalyzer — Batch evaluation view for the BCI dashboard.
  *
- * Simulates an offline cross-validation run against well-known public BCI
- * datasets (or the current session's synthetic data).  All result data is
- * static / deterministic — the component is intentionally self-contained and
- * does not touch the WebSocket hook.
+ * Public/synthetic datasets resolve to static, deterministic results. The real
+ * lab recording (``eeg_recording_230620261205``) is different: selecting it and
+ * running the analysis dispatches an ``ANALYZE_OFFLINE`` command over the
+ * WebSocket and renders the metrics the Python backend returns.
+ *
+ * NOTE: this component is not currently mounted by the app (the live offline
+ * view is `OfflineSidebar` inside `Dashboard.tsx`). The real-recording wiring
+ * here mirrors that integration so the component stays self-consistent.
  */
 
 import { useState } from 'react';
@@ -44,6 +48,9 @@ interface CVResult {
   totalEpochs: number;
 }
 
+/** Real lab recording — analysed live by the Python backend. */
+const REAL_DATASET_ID = 'eeg_recording_230620261205';
+
 const DATASETS: Dataset[] = [
   {
     id: 'bci4-2a',
@@ -69,7 +76,24 @@ const DATASETS: Dataset[] = [
     channels: 8,
     note: 'Mock mu / beta rhythms · 8-channel C3–Pz montage',
   },
+  {
+    id: REAL_DATASET_ID,
+    name: 'EEG Recoding 230620261205 (Sleep Lab)',
+    subjects: 1,
+    hz: 512,
+    channels: 2,
+    note: 'Real motor imagery · C3/C4 linked-mastoid · live backend analysis',
+  },
 ];
+
+/** Same-origin WebSocket endpoint (mirrors useBCISocket). */
+const WS_URL =
+  typeof window !== 'undefined'
+    ? (window.location.protocol === 'https:' ? 'wss' : 'ws') +
+      '://' +
+      window.location.host +
+      '/ws'
+    : 'ws://localhost:8765';
 
 const CV_RESULTS: Record<string, CVResult> = {
   'bci4-2a': {
@@ -274,6 +298,42 @@ export default function OfflineAnalyzer() {
   function runAnalysis() {
     setIsAnalyzing(true);
     setResult(null);
+
+    if (selectedId === REAL_DATASET_ID) {
+      // Dispatch the real analysis to the backend and await its metrics.
+      const ws = new WebSocket(WS_URL);
+      ws.onopen = () =>
+        ws.send(
+          JSON.stringify({ command: 'ANALYZE_OFFLINE', dataset: REAL_DATASET_ID }),
+        );
+      ws.onmessage = ({ data }: MessageEvent<string>) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(data);
+        } catch {
+          return;
+        }
+        if (msg.type === 'offline_result' && msg.dataset === REAL_DATASET_ID) {
+          const { tp, fn, fp, tn } = msg.confusion_matrix;
+          setResult({
+            folds: msg.fold_accuracies,
+            matrix: [[tp, fn], [fp, tn]],
+            totalEpochs: msg.total_epochs,
+          });
+          setIsAnalyzing(false);
+          ws.close();
+        } else if (msg.type === 'offline_error') {
+          setIsAnalyzing(false);
+          ws.close();
+        }
+      };
+      ws.onerror = () => {
+        setIsAnalyzing(false);
+        ws.close();
+      };
+      return;
+    }
+
     setTimeout(() => {
       setResult(CV_RESULTS[selectedId]);
       setIsAnalyzing(false);

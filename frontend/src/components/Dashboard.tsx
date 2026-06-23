@@ -43,6 +43,9 @@ import {
 } from 'lucide-react';
 import { useBCISocket } from '../hooks/useBCISocket';
 import type {
+  BCICommand,
+  BCIOfflineErrorMessage,
+  BCIOfflineResultMessage,
   ConnectionStatus,
   IntentClass,
   SystemState,
@@ -55,30 +58,36 @@ import { cn } from '../lib/utils';
 
 type AppMode = 'online' | 'offline';
 
+/** Real lab recording — analysed live by the Python backend, not simulated. */
+const REAL_DATASET_ID = 'eeg_recording_230620261205';
+
 const DATASETS = [
   { id: 'bci4-2a-s1',       name: 'BCI Competition IV 2a – Session 1', hz: 250, ch: 22 },
   { id: 'bci4-2a-s2',       name: 'BCI Competition IV 2a – Session 2', hz: 250, ch: 22 },
   { id: 'thinking-out-loud', name: 'Thinking Out Loud Dataset',         hz: 256, ch: 14 },
   { id: 'synthetic',         name: 'Synthetic Session (current run)',   hz: 250, ch: 8  },
+  { id: REAL_DATASET_ID,     name: 'EEG Recoding 230620261205 (Sleep Lab)', hz: 512, ch: 2 },
 ] as const;
 
 type DatasetId = (typeof DATASETS)[number]['id'];
 
-const CV_ACCURACY: Record<DatasetId, number> = {
+// Static results for the simulated/public datasets. The real recording is keyed
+// separately because its metrics arrive from the backend at runtime.
+const CV_ACCURACY: Record<string, number> = {
   'bci4-2a-s1':       0.870,
   'bci4-2a-s2':       0.854,
   'thinking-out-loud': 0.743,
   synthetic:           0.912,
 };
 
-const CONFUSION: Record<DatasetId, [[number, number], [number, number]]> = {
+const CONFUSION: Record<string, [[number, number], [number, number]]> = {
   'bci4-2a-s1':       [[46, 4],  [9,  41]],
   'bci4-2a-s2':       [[44, 6],  [7,  43]],
   'thinking-out-loud': [[38, 12], [7,  43]],
   synthetic:           [[48, 2],  [3,  47]],
 };
 
-const CV_EPOCHS: Record<DatasetId, number> = {
+const CV_EPOCHS: Record<string, number> = {
   'bci4-2a-s1':        100,
   'bci4-2a-s2':        100,
   'thinking-out-loud': 100,
@@ -158,6 +167,39 @@ function generateEpochSequence(
     [epochs[i], epochs[j]] = [epochs[j], epochs[i]];
   }
   return epochs;
+}
+
+/** Rotate an array by `by` positions (used to animate the real EEG snapshot). */
+function rotate(arr: number[], by: number): number[] {
+  const n = arr.length;
+  if (n === 0) return arr;
+  const k = ((by % n) + n) % n;
+  return arr.slice(k).concat(arr.slice(0, k));
+}
+
+/**
+ * Convert a backend offline-analysis payload into the OfflineResult shape the
+ * playback machinery already understands. Per-epoch correctness is reconstructed
+ * from the confusion matrix, and the real cleaned C3 snapshot drives the chart.
+ */
+function offlineResultFromMessage(m: BCIOfflineResultMessage): OfflineResult {
+  const { tp, fn, fp, tn } = m.confusion_matrix;
+  const matrix: [[number, number], [number, number]] = [[tp, fn], [fp, tn]];
+  const epochs = generateEpochSequence(matrix);
+
+  const snapshot = m.signal_snapshot?.length ? m.signal_snapshot : null;
+  if (snapshot) {
+    epochs.forEach((e, i) => {
+      e.waveform = rotate(snapshot, i * 9);
+    });
+  }
+
+  return {
+    acc:        m.accuracy,
+    epochCount: m.total_epochs,
+    matrix,
+    epochs,
+  };
 }
 
 const CHECKLIST = [
@@ -695,16 +737,46 @@ interface OfflineSidebarProps {
   onResume:        () => void;
   /** Index of the epoch currently shown in the center panels (−1 = none yet). */
   currentEpochIdx: number;
+  /** Send a control command to the backend (used for ANALYZE_OFFLINE). */
+  sendCommand:     (cmd: BCICommand) => void;
+  /** Latest real-recording analysis result from the backend. */
+  realResult:      BCIOfflineResultMessage | null;
+  /** Latest real-recording analysis error from the backend. */
+  realError:       BCIOfflineErrorMessage | null;
 }
 
 function OfflineSidebar({
   onResult, isPaused, isPlaybackOn, onPause, onResume, currentEpochIdx,
+  sendCommand, realResult, realError,
 }: OfflineSidebarProps) {
   const [selectedId, setSelectedId] = useState<DatasetId>('bci4-2a-s1');
   const [isRunning,  setIsRunning]  = useState(false);
   const [result, setResult]         = useState<OfflineResult | null>(null);
+  const [errorMsg,  setErrorMsg]    = useState<string | null>(null);
+  // True while we await a backend response for the real recording.
+  const awaitingRealRef = useRef(false);
 
   const dataset = DATASETS.find(d => d.id === selectedId)!;
+  const isReal  = selectedId === REAL_DATASET_ID;
+
+  // Resolve the loading state once the backend returns a real-recording result…
+  useEffect(() => {
+    if (!awaitingRealRef.current || !realResult) return;
+    if (realResult.dataset !== REAL_DATASET_ID) return;
+    awaitingRealRef.current = false;
+    const r = offlineResultFromMessage(realResult);
+    setResult(r);
+    onResult(r);
+    setIsRunning(false);
+  }, [realResult, onResult]);
+
+  // …or surface an error if the analysis failed.
+  useEffect(() => {
+    if (!awaitingRealRef.current || !realError) return;
+    awaitingRealRef.current = false;
+    setIsRunning(false);
+    setErrorMsg(realError.message || 'Offline analysis failed.');
+  }, [realError]);
 
   // ── Running confusion matrix (updates every tick) ──────────────────────
   const seenCount = result ? Math.min(currentEpochIdx + 1, result.epochs.length) : 0;
@@ -736,7 +808,17 @@ function OfflineSidebar({
   function runAnalysis() {
     setIsRunning(true);
     setResult(null);
+    setErrorMsg(null);
     onResult(null);
+
+    if (isReal) {
+      // Trigger the real backend pipeline; result arrives via `realResult`.
+      awaitingRealRef.current = true;
+      sendCommand({ command: 'ANALYZE_OFFLINE', dataset: REAL_DATASET_ID });
+      return;
+    }
+
+    // Simulated/public datasets resolve locally after a short delay.
     setTimeout(() => {
       const r: OfflineResult = {
         acc:        CV_ACCURACY[selectedId],
@@ -765,6 +847,8 @@ function OfflineSidebar({
             onChange={e => {
               setSelectedId(e.target.value as DatasetId);
               setResult(null);
+              setErrorMsg(null);
+              awaitingRealRef.current = false;
               onResult(null);
             }}
             className="w-full appearance-none rounded-lg border border-zinc-700 bg-zinc-800
@@ -781,7 +865,7 @@ function OfflineSidebar({
         </div>
 
         <div className="mt-1.5 font-mono text-[10px] text-zinc-500">
-          {dataset.ch} ch · {dataset.hz} Hz
+          {dataset.ch} ch · {dataset.hz} Hz{isReal ? ' · live backend analysis' : ''}
         </div>
 
 
@@ -789,7 +873,8 @@ function OfflineSidebar({
         {isRunning ? (
           <button disabled className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg
                                       py-2 text-xs font-semibold bg-zinc-800 text-zinc-500 cursor-not-allowed">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Running…
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {isReal ? 'Analyzing recording…' : 'Running…'}
           </button>
         ) : isPlaybackOn ? (
           /* Playback in progress — Pause or Resume */
@@ -935,11 +1020,27 @@ function OfflineSidebar({
         </div>
       )}
 
+      {/* Error banner (real-recording analysis failures) */}
+      {errorMsg && !isRunning && (
+        <div className="animate-fade-in rounded-xl border border-red-900/50 bg-red-950/30 px-4 py-3">
+          <div className="text-[9px] font-bold tracking-widest text-red-400 uppercase">
+            Analysis failed
+          </div>
+          <div className="mt-1 font-mono text-[10px] leading-snug text-red-300/80">
+            {errorMsg}
+          </div>
+        </div>
+      )}
+
       {/* Pre-run placeholder */}
-      {!result && !isRunning && (
+      {!result && !isRunning && !errorMsg && (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-zinc-800/40 py-10 text-zinc-500">
           <BarChart2 className="h-7 w-7" />
-          <span className="text-[10px]">Run analysis to see results</span>
+          <span className="text-[10px]">
+            {isReal
+              ? 'Run analysis to validate the real recording on the backend'
+              : 'Run analysis to see results'}
+          </span>
         </div>
       )}
     </div>
@@ -963,8 +1064,15 @@ export default function Dashboard() {
   };
 
   // The hook stays fully active in both modes (keeps the WS connection alive).
-  const { status, latest, waveformBuffer, systemState, sendCommand } =
-    useBCISocket();
+  const {
+    status,
+    latest,
+    waveformBuffer,
+    systemState,
+    sendCommand,
+    offlineResult: realOfflineResult,
+    offlineError: realOfflineError,
+  } = useBCISocket();
 
   // ── Online flash key ──────────────────────────────────────────────────────
   const [flashKey, setFlashKey] = useState(0);
@@ -1089,6 +1197,9 @@ export default function Dashboard() {
               onPause={() => setOfflinePaused(true)}
               onResume={() => setOfflinePaused(false)}
               currentEpochIdx={offlineResult ? playbackIdx : -1}
+              sendCommand={sendCommand}
+              realResult={realOfflineResult}
+              realError={realOfflineError}
             />
           )}
         </aside>

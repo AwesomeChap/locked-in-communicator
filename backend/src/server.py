@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -24,6 +25,13 @@ from aiohttp import web
 
 from config import load_config
 from pipeline.bci_pipeline import BCIPipeline
+
+# The reusable real-EDF analysis core lives in scripts/process_real_data.py.
+# Add that directory to the path so the server can import it directly, per the
+# integration spec ("import and trigger the logic in process_real_data.py").
+_SCRIPTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +98,8 @@ class BCIVerificationServer:
         Pause epoch generation (server stays alive, waveform freezes).
     ``{"command": "RESET"}``
         Clear rolling accuracy history and epoch counter.
+    ``{"command": "ANALYZE_OFFLINE", "dataset": "<id>"}``
+        Run an offline validation on a real recording and return the metrics.
     """
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
@@ -228,14 +238,14 @@ class BCIVerificationServer:
 
         try:
             async for raw in websocket:
-                await self._dispatch_command(raw)
+                await self._dispatch_command(raw, websocket)
         except Exception:
             pass
         finally:
             self._clients.discard(websocket)
             logger.info("Client disconnected: %s  (total: %d)", addr, len(self._clients))
 
-    async def _dispatch_command(self, raw: str) -> None:
+    async def _dispatch_command(self, raw: str, websocket: Any) -> None:
         try:
             msg: dict[str, Any] = json.loads(raw)
         except json.JSONDecodeError:
@@ -257,11 +267,61 @@ class BCIVerificationServer:
             self._epoch_count = 0
             logger.info("Stats reset.")
             handled = True
+        elif command == "ANALYZE_OFFLINE":
+            # Offload to a background task so the analysis (EDF load + CSP/LDA
+            # cross-validation) never blocks this client's receive loop or the
+            # shared event loop.
+            dataset = str(msg.get("dataset", ""))
+            asyncio.create_task(self._run_offline_analysis(dataset, websocket))
         else:
             logger.warning("Unknown command: %r", command)
 
         if handled:
             await self._broadcast_state()
+
+    async def _run_offline_analysis(self, dataset: str, websocket: Any) -> None:
+        """Validate a real recording off the event loop and return the metrics.
+
+        Currently only the lab EDF recording is wired in. The CPU/IO-bound
+        analysis runs in the default thread-pool executor so the WebSocket
+        server stays responsive; the structured result is then pushed back to
+        the requesting client.
+        """
+
+        logger.info("Offline analysis requested for dataset %r.", dataset)
+        try:
+            from process_real_data import DATASET_ID, analyze_recording
+
+            if dataset != DATASET_ID:
+                raise ValueError(f"Unknown offline dataset: {dataset!r}")
+
+            loop = asyncio.get_running_loop()
+            # save=False: the live request does not need to rewrite the JSON
+            # artifacts that the CLI script maintains.
+            result = await loop.run_in_executor(
+                None, lambda: analyze_recording(save=False)
+            )
+            await websocket.send(json.dumps({"type": "offline_result", **result}))
+            logger.info(
+                "Offline analysis complete for %r: acc=%.3f over %d epochs.",
+                dataset,
+                result["accuracy"],
+                result["total_epochs"],
+            )
+        except Exception as exc:  # noqa: BLE001 - report any failure to the UI
+            logger.exception("Offline analysis failed for %r.", dataset)
+            try:
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "type": "offline_error",
+                            "dataset": dataset,
+                            "message": str(exc),
+                        }
+                    )
+                )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Entry-point
