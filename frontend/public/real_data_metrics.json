@@ -1,7 +1,7 @@
 {
   "id": "real-eeg-session",
   "name": "Real EEG Session (230620261205)",
-  "generatedAt": "2026-06-23T17:33:51.198157+00:00",
+  "generatedAt": "2026-06-24T09:31:55.244707+00:00",
   "samplingRateHz": 512.0,
   "channels": [
     "C3-A1",

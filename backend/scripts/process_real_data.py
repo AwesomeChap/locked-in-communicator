@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,11 +63,48 @@ CHANNEL_INDEX = {
 # Stable identifier shared with the frontend dataset dropdown.
 DATASET_ID = "eeg_recording_230620261205"
 
-# Default recording lives in the parent of the repository root.
-DEFAULT_EDF = REPO_ROOT.parent / "EEG Recoding 230620261205.edf"
+EDF_FILENAME = "EEG Recoding 230620261205.edf"
 
 # Points sent in the cleaned C3/C4 waveform snapshot for the live chart.
 SNAPSHOT_POINTS = 120
+
+
+def _edf_candidates() -> list[Path]:
+    """Ordered locations to search for the recording.
+
+    Resolution must work in three contexts: local dev (file sits next to the
+    repo), the bundled Docker image (file copied into ``backend/data/`` and
+    shipped inside the container), and any custom deployment via the
+    ``REAL_EDF_PATH`` environment variable.
+    """
+
+    candidates: list[Path] = []
+    env_path = os.environ.get("REAL_EDF_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.extend(
+        [
+            BACKEND_ROOT / "data" / EDF_FILENAME,  # bundled — works in Docker
+            REPO_ROOT.parent / EDF_FILENAME,        # original dev location
+            REPO_ROOT / EDF_FILENAME,
+            Path.cwd() / EDF_FILENAME,
+        ]
+    )
+    return candidates
+
+
+def resolve_edf_path() -> Path:
+    """Return the first existing recording location, or raise with guidance."""
+
+    for candidate in _edf_candidates():
+        expanded = candidate.expanduser()
+        if expanded.is_file():
+            return expanded.resolve()
+    searched = "\n  ".join(str(c) for c in _edf_candidates())
+    raise FileNotFoundError(
+        f"Could not locate '{EDF_FILENAME}'. Set the REAL_EDF_PATH environment "
+        f"variable or place the file in backend/data/. Searched:\n  {searched}"
+    )
 
 # Trial / experiment geometry.
 EPOCH_LENGTH_S = 2.0          # 2-second imagery window per the protocol
@@ -302,10 +340,12 @@ def analyze_recording(
     a TP/FP/TN/FN confusion matrix, and cleaned C3/C4 signal snapshots.
     """
 
-    edf_path = Path(edf_path) if edf_path is not None else DEFAULT_EDF
-    edf_path = edf_path.expanduser().resolve()
-    if not edf_path.exists():
-        raise FileNotFoundError(f"EDF file not found: {edf_path}")
+    if edf_path is not None:
+        edf_path = Path(edf_path).expanduser().resolve()
+        if not edf_path.is_file():
+            raise FileNotFoundError(f"EDF file not found: {edf_path}")
+    else:
+        edf_path = resolve_edf_path()
 
     eeg, marker, fs = load_referenced_signals(edf_path)
     onsets, marker_labels = detect_marker_trials(marker, fs)
@@ -377,8 +417,11 @@ def main() -> None:
     parser.add_argument(
         "--edf",
         type=Path,
-        default=DEFAULT_EDF,
-        help="Path to the EDF recording (default: parent of the repo root).",
+        default=None,
+        help=(
+            "Path to the EDF recording. Defaults to REAL_EDF_PATH, then "
+            "backend/data/, then the repo's parent directory."
+        ),
     )
     args = parser.parse_args()
 
